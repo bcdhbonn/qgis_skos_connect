@@ -1,6 +1,6 @@
 # SkosConnect: Multilingual LOD Importer for QGIS
 
-**SkosConnect** is a user-friendly QGIS plugin that allows you to import controlled vocabularies directly from a Skosmos online API or an offline SKOS/RDF file into a relational database layer (like PostgreSQL or a local **GeoPackage**).
+**SkosConnect** is a user-friendly QGIS plugin that allows you to import controlled vocabularies directly from a Skosmos online API or an offline SKOS/RDF file into a relational database layer (like PostgreSQL/PostGIS or a local **GeoPackage**).
 
 ---
 
@@ -30,16 +30,63 @@ Instead of copy-pasting the URI and labels into every single point, line, or pol
 
 ---
 
-## 📦 Why GeoPackage (.gpkg) is Perfect for this Workflow
+## 🏛️ Database Comparison: PostgreSQL vs. GeoPackage
 
-If you don't have a central PostgreSQL database server, a **GeoPackage (.gpkg)** is the best choice:
-* It is a single, portable file (easy to email or share).
-* Unlike Shapefiles (which truncate column names to 10 characters and fail on long strings), a GeoPackage is a full SQLite database that easily handles long URI strings and relations.
-* You can store both your map layers (spatial) and your vocabulary lookup tables (non-spatial) in the **same** file.
+When setting up your lookup tables, you have two main options. Here is why you might choose one over the other:
+
+### 🚀 PostgreSQL/PostGIS (The Professional Enterprise Solution)
+For production environments, team projects, or institutional databases, **PostgreSQL with the PostGIS extension** is the industry standard and the superior solution.
+* **Multi-User Collaboration:** Dozens of users can view and edit the data at the same time. QGIS communicates with the database server, preventing lockouts or file corruption.
+* **Robust Security & Permissions:** You can create individual user roles (e.g., digitizers can only select vocabulary terms, admins can update the vocabulary table, and public viewers can only read the data).
+* **Data Integrity Rules:** PostgreSQL can strictly enforce relationships (Foreign Keys) directly on the database level. If a user tries to delete a vocabulary term that is still used on the map, the server will block the action and preserve database integrity.
+* **Server-side Triggers & Functions:** You can automate tasks (e.g., logging who changed a value, or auto-generating timestamps).
+
+### 📦 GeoPackage (.gpkg) (The Lightweight & Portable Alternative)
+If you are a single researcher, don't have access to an IT department to host a server, or just want to quickly test the workflow:
+* **Single File:** The entire database (map layers and lookup tables) is stored in a single `.gpkg` file on your computer.
+* **Zero Setup:** No server configuration, usernames, passwords, or connection strings required.
+* **Local limitations:** It is not designed for multiple users editing simultaneously. If two people write to the same file over a shared drive (like Dropbox/Sciebo), it can lead to synchronization conflicts and database corruption.
 
 ---
 
-## 🚀 Step-by-Step Beginner Tutorial (Using GeoPackage)
+## 🚀 Tutorial 1: Setting up with PostgreSQL/PostGIS
+
+### Step 1: Create your Lookup Table in PostgreSQL
+Run the following SQL statement in your database management tool (like pgAdmin or the QGIS DB Manager SQL window) to create your vocabulary lookup table:
+
+```sql
+CREATE TABLE time_periods (
+    id SERIAL PRIMARY KEY,
+    uri VARCHAR(255) UNIQUE NOT NULL,
+    pref_ger VARCHAR(100),
+    pref_eng VARCHAR(100)
+);
+```
+
+If you want to enforce a foreign key in your map layer, your map table should link to this lookup table:
+
+```sql
+CREATE TABLE excavation_sites (
+    id SERIAL PRIMARY KEY,
+    site_name VARCHAR(100) NOT NULL,
+    geom GEOMETRY(Point, 4326),
+    period_id INTEGER REFERENCES time_periods(id)
+);
+```
+
+### Step 2: Use SkosConnect to Import Concepts
+1. In QGIS, connect to your PostgreSQL database.
+2. Click the database plug icon **🔌 SkosConnect** in QGIS (located in the database toolbar or under **Plugins ➡️ SkosConnect**).
+3. **SKOS Source Configuration:** Choose online or offline file.
+4. **1. Target Table:** Select your PostgreSQL table (`time_periods`).
+5. **Language Import Options:** Ensure both German and English checkboxes are checked (the plugin automatically detects that these columns exist in your table!).
+6. **Optional Hierarchy Link:**
+   * If you are importing sub-periods (e.g., "Early Bronze Age") and want to link them to an existing parent category in another table (e.g., "Bronze Age" in `epochs`), check this box and select the parent table, parent concept, and target foreign key column.
+7. Click **Load Top Concepts**, check the items you want to import, and click **3. Write Selected Concepts to Database**.
+
+---
+
+## 🚀 Tutorial 2: Setting up with GeoPackage (.gpkg)
 
 ### Step 1: Create a Vocabulary Lookup Table in QGIS
 1. In QGIS, go to the top menu: **Layer ➡️ Create Layer ➡️ New GeoPackage Layer...**
@@ -53,27 +100,27 @@ If you don't have a central PostgreSQL database server, a **GeoPackage (.gpkg)**
 6. Click **Add to Fields List** for each, then click **OK**. You will see the new table in your layers panel.
 
 ### Step 2: Use SkosConnect to Import Concepts
-1. Click the database plug icon **🔌 SkosConnect** in QGIS (located in the database toolbar or under **Plugins ➡️ SkosConnect**).
-2. **SKOS Source Configuration:**
-   * **Online:** Keep selected and use the default URL (`https://skosmos.dbprojects.uni-bonn.de/rest/v1/hector`) or enter your own Skosmos server.
-   * **Offline:** Select this if you have a local SKOS file (e.g., `.rdf`, `.xml`, or `.ttl`).
+1. Click the database plug icon **🔌 SkosConnect** in QGIS.
+2. **SKOS Source Configuration:** Choose online or offline file.
 3. **1. Target Table:** Select your newly created `vocab_periods` table.
-4. **Language Import Options:** Ensure both German and English checkboxes are checked (the plugin automatically detects that these columns exist in your table!).
-5. **2. Browse Vocabulary:** Click **Load Top Concepts**. Click the arrow keys to expand concepts (like expanding folders). Check the items you want to import.
-6. **3. Write Selected Concepts to Database:** Click this button. The plugin will write the selected URIs and their translations into your GeoPackage table.
+4. **Language Import Options:** Ensure both German and English checkboxes are checked.
+5. Click **Load Top Concepts**. Click the arrow keys to expand concepts, check the items you want to import, and click **3. Write Selected Concepts to Database**.
 
-### Step 3: Link your Map Layer to the Vocabulary
-Now, when you draw a point on your map, you want a dropdown menu showing the periods we just imported.
-1. Double-click your spatial map layer (e.g., `excavation_sites`) and open **Attributes Form**.
-2. Select your period attribute column (e.g., `period_uri`).
+---
+
+## 🔗 Linking your Map Layer to the Vocabulary (QGIS Configuration)
+Once your lookup table is populated (either in PostgreSQL or GeoPackage), you want a dropdown menu to appear in QGIS when editing features:
+
+1. Double-click your spatial map layer (e.g., `excavation_sites`) and open the **Attributes Form** settings.
+2. Select your period attribute column (e.g., `period_uri` or `period_id`).
 3. Under **Widget Type**, choose **Value Relation**.
 4. Configure it as follows:
-   * **Layer:** `vocab_periods`
-   * **Key column:** `uri` (what QGIS saves in the background)
-   * **Value column:** `pref_eng` or `pref_ger` (what you see on screen)
+   * **Layer:** `vocab_periods` or `time_periods`
+   * **Key column:** `uri` (or `id` if you are using integer foreign keys in PostgreSQL)
+   * **Value column:** `pref_eng` or `pref_ger` (the human-readable label you want to see on screen)
 5. Click **OK**. 
 
-🎉 **Done!** When you add or edit features in your map layer, you will now see a clean dropdown menu showing the correct period terms. QGIS saves the stable URI in the background, keeping your database clean and database-compliant!
+🎉 **Done!** When you add or edit features in your map layer, you will now see a clean dropdown menu showing the correct period terms. QGIS saves the stable URI/ID in the background, keeping your database clean and database-compliant!
 
 ---
 
@@ -82,7 +129,7 @@ Now, when you draw a point on your map, you want a dropdown menu showing the per
 ### 1. Copying the Plugin
 Copy this folder (`SkosConnect`) into your QGIS plugin directory:
 * **Windows:** `%APPDATA%\QGIS\QGIS3\profiles\default\python\plugins\SkosConnect`
-* **Linux:** `~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/SkosConnect`
+* **Linux:** `~/.local/share/QGIS/QGIS3/profiles\default\python\plugins\SkosConnect`
 * **macOS:** `~/Library/Application Support/QGIS/QGIS3/profiles/default/python/plugins/SkosConnect`
 
 Restart QGIS, then activate it in **Plugins ➡️ Manage and Install Plugins**.
