@@ -1,0 +1,9 @@
+[general]
+name=SkosConnect
+qgisMinimumVersion=3.0
+description=Multilingualer LOD Import aus Skosmos direkt in relationale PostgreSQL-Tabellen.
+version=1.0
+author=Matthias Lang
+email=Matthias.lang@uni-bonn.de
+about=Bridging the Gap: Hector Vocabulary to QGIS.
+category=Database
