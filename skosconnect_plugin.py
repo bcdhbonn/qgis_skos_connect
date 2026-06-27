@@ -241,7 +241,7 @@ class SkosConnectMultilingualImporter(QDialog):
         self.layout.addWidget(self.group_lang)
 
         # Optional Foreign Key Link
-        self.group_fk = QGroupBox("Optional Hierarchy Link (e.g., link Periods to Epoche)")
+        self.group_fk = QGroupBox("Optional Hierarchy Link (e.g., link Periods to Epochs)")
         self.group_fk.setCheckable(True)
         self.group_fk.setChecked(False) 
         fk_layout = QFormLayout()
@@ -273,7 +273,7 @@ class SkosConnectMultilingualImporter(QDialog):
         self.tree.itemChanged.connect(self.on_item_changed) 
         self.layout.addWidget(self.tree)
 
-        self.btn_load = QPushButton("Load Top Concepts (German Base UI)")
+        self.btn_load = QPushButton("Load Top Concepts")
         self.btn_load.clicked.connect(self.load_top_concepts)
         self.layout.addWidget(self.btn_load)
 
@@ -301,7 +301,7 @@ class SkosConnectMultilingualImporter(QDialog):
         self.tree.blockSignals(False)
         
         if is_online:
-            self.btn_load.setText("Load Top Concepts (German Base UI)")
+            self.btn_load.setText("Load Top Concepts")
             self.btn_load.setEnabled(True)
         else:
             if self.txt_file_path.text():
@@ -372,7 +372,7 @@ class SkosConnectMultilingualImporter(QDialog):
         label_col = 'pref_ger' if 'pref_ger' in fields else 'term'
         for f in layer.getFeatures():
             val = f[label_col]
-            label_str = str(val) if val is not None else "Unbenannt"
+            label_str = str(val) if val is not None else "Unnamed"
             self.combo_parent_term.addItem(label_str, f['id'])
 
     def load_top_concepts(self):
@@ -388,7 +388,7 @@ class SkosConnectMultilingualImporter(QDialog):
             self.base_url = self.txt_api_url.text().strip().rstrip('/')
             
             try:
-                # Bugfix: Added 10s timeout to prevent unendliche blocks if server hangs
+                # Bugfix: Added 10s timeout to prevent infinite blocks if server hangs
                 resp = requests.get(f"{self.base_url}/topConcepts", params={'lang': 'de'}, timeout=10)
                 resp.raise_for_status()
                 tops = resp.json().get('topconcepts', [])
@@ -677,7 +677,7 @@ class SkosConnectMultilingualImporter(QDialog):
                 features_to_add.append(feat)
 
             if features_to_add:
-                self.btn_import.setText("Writing to PostgreSQL Database...")
+                self.btn_import.setText("Writing to Database...")
                 QApplication.processEvents()
                 
                 # Bugfix: Start editing session safely
@@ -697,7 +697,7 @@ class SkosConnectMultilingualImporter(QDialog):
                     # Retrieve database commit errors
                     commit_errs = layer.commitErrors()
                     layer.rollBack()
-                    err_msg = "\n".join(commit_errs) if commit_errs else "PostgreSQL rejected the insert (Constraint violation?)."
+                    err_msg = "\n".join(commit_errs) if commit_errs else "Database rejected the insert (Constraint violation?)."
                     QMessageBox.critical(self, "Database Error", f"Failed to save changes:\n{err_msg}")
             else:
                 QMessageBox.warning(self, "Nothing to do", "All selected concepts already exist in this table!")
@@ -719,25 +719,27 @@ class SkosConnectPlugin:
         self.dialog = None
 
     def initGui(self):
-        # Elegant DB-Icon from QGIS system resources
+        # Retrieve QGIS theme icon for database connections
         icon = QgsApplication.getThemeIcon("/mActionAddWfsLayer.svg")
         
         self.action = QAction(icon, "SkosConnect LOD Importer", self.iface.mainWindow())
         self.action.triggered.connect(self.run)
         
-        # Add to Toolbar "Database"
+        # Add to the "Database" Toolbar
         self.iface.addToolBarIcon(self.action)
-        # Add to Menu "Plugins -> SkosConnect"
+        # Add to the "Plugins" menu
         self.iface.addPluginToMenu("SkosConnect", self.action)
 
     def unload(self):
+        # Clean up GUI actions when plugin is deactivated
         self.iface.removePluginMenu("SkosConnect", self.action)
         self.iface.removeToolBarIcon(self.action)
 
     def run(self):
+        # Open dialog window
         if not self.dialog:
             self.dialog = SkosConnectMultilingualImporter(self.iface.mainWindow())
         
-        # Refresh layers list on show
+        # Refresh the target layers lists on every dialog show
         self.dialog.populate_layers()
         self.dialog.show()
