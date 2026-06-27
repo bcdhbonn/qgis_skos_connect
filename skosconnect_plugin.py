@@ -35,7 +35,7 @@ def get_rdflib_format(file_path):
     return 'xml'
 
 def parse_skos_with_rdflib(file_path, file_format):
-    """Parse SKOS concept hierarchy from file using rdflib."""
+    """Parse SKOS concept hierarchy from file using rdflib, extracting all language labels."""
     import rdflib
     g = rdflib.Graph()
     g.parse(file_path, format=file_format)
@@ -48,21 +48,16 @@ def parse_skos_with_rdflib(file_path, file_format):
         uri = str(s)
         concepts[uri] = {
             'uri': uri,
-            'pref_de': '',
-            'pref_en': '',
+            'labels': {}, # Map of lang_code -> label string
             'narrower': [],
             'broader': []
         }
         
-        # Extract preferred labels
+        # Extract all preferred labels
         for label in g.objects(s, SKOS.prefLabel):
             lang = getattr(label, 'language', '') or ''
-            lang = lang.lower()
-            text = str(label)
-            if 'de' in lang:
-                concepts[uri]['pref_de'] = text
-            elif 'en' in lang or not concepts[uri]['pref_en']:
-                concepts[uri]['pref_en'] = text
+            lang = lang.lower() or 'default'
+            concepts[uri]['labels'][lang] = str(label)
                 
         # Extract direct hierarchical relationships
         for child in g.objects(s, SKOS.narrower):
@@ -82,7 +77,7 @@ def parse_skos_with_rdflib(file_path, file_format):
     return concepts
 
 def parse_skos_rdf_xml(file_path):
-    """Fallback XML parser for standard RDF/XML SKOS files without rdflib dependency."""
+    """Fallback XML parser for standard RDF/XML SKOS files without rdflib, extracting all language labels."""
     tree = ET.parse(file_path)
     root = tree.getroot()
     
@@ -112,8 +107,7 @@ def parse_skos_rdf_xml(file_path):
             if uri not in concepts:
                 concepts[uri] = {
                     'uri': uri,
-                    'pref_de': '',
-                    'pref_en': '',
+                    'labels': {},
                     'narrower': [],
                     'broader': []
                 }
@@ -125,16 +119,13 @@ def parse_skos_rdf_xml(file_path):
                 local_name = child.tag.split("}")[-1] if "}" in child.tag else child.tag
                 
                 if local_name == 'prefLabel':
-                    lang = ""
+                    lang = "default"
                     for attr_name, attr_val in child.attrib.items():
                         if attr_name.endswith("}lang"):
                             lang = attr_val.lower()
                             break
                     text = child.text or ''
-                    if 'de' in lang:
-                        concept['pref_de'] = text
-                    elif 'en' in lang or not concept['pref_en']:
-                        concept['pref_en'] = text
+                    concept['labels'][lang] = text
                 elif local_name == 'narrower':
                     child_uri = child.attrib.get(RDF_RESOURCE)
                     if child_uri:
@@ -171,6 +162,25 @@ def find_roots(concepts):
     if not roots and concepts:
         roots = list(concepts.keys())
     return roots
+
+def get_concept_label(concept, lang_code, fallback_uri):
+    """Extract preferred label from concept dict matching the given language code, with fallbacks."""
+    if not concept:
+        return fallback_uri
+    labels = concept.get('labels', {})
+    if lang_code in labels:
+        return labels[lang_code]
+    # Check partial matches (e.g. 'de' matches 'de-de')
+    for l, val in labels.items():
+        if l.startswith(lang_code) or lang_code.startswith(l):
+            return val
+    # Fallbacks
+    for l in ['en', 'de', 'default']:
+        if l in labels:
+            return labels[l]
+    if labels:
+        return list(labels.values())[0]
+    return fallback_uri
 
 
 # ---------------------------------------------------------
@@ -228,16 +238,10 @@ class SkosConnectMultilingualImporter(QDialog):
         self.combo_target_layer.currentIndexChanged.connect(self.on_target_layer_changed)
         self.layout.addWidget(self.combo_target_layer)
 
-        # Dynamic Language Selection
+        # Dynamic Language Selection (Populated dynamically based on database columns)
         self.group_lang = QGroupBox("Language Import Options (Detected from Table Columns)")
-        lang_layout = QHBoxLayout()
-        self.chk_ger = QCheckBox("Import German ('pref_ger')")
-        self.chk_eng = QCheckBox("Import English ('pref_eng')")
-        self.chk_ger.setEnabled(False)
-        self.chk_eng.setEnabled(False)
-        lang_layout.addWidget(self.chk_ger)
-        lang_layout.addWidget(self.chk_eng)
-        self.group_lang.setLayout(lang_layout)
+        self.lang_layout = QHBoxLayout()
+        self.group_lang.setLayout(self.lang_layout)
         self.layout.addWidget(self.group_lang)
 
         # Optional Foreign Key Link
@@ -288,6 +292,7 @@ class SkosConnectMultilingualImporter(QDialog):
         self.base_url = "https://skosmos.dbprojects.uni-bonn.de/rest/v1/hector"
         self.offline_concepts = {}
         self.label_cache = {}
+        self.lang_checkboxes = {} # Mapping: column_name -> (QCheckBox, lang_code)
         
         self.populate_layers()
 
@@ -334,10 +339,15 @@ class SkosConnectMultilingualImporter(QDialog):
 
     def on_target_layer_changed(self):
         self.combo_fk_col.clear()
-        self.chk_ger.setEnabled(False)
-        self.chk_eng.setEnabled(False)
-        self.chk_ger.setChecked(False)
-        self.chk_eng.setChecked(False)
+        
+        # Clear dynamically generated checkboxes
+        layout = self.group_lang.layout()
+        while layout.count():
+            child = layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
+        self.lang_checkboxes = {}
 
         layer_id = self.combo_target_layer.currentData()
         if not layer_id: return
@@ -346,16 +356,33 @@ class SkosConnectMultilingualImporter(QDialog):
             
         fields = layer.fields().names()
         
+        # Standard mappings for common suffixes to ISO language codes
+        LANG_MAP = {
+            'ger': 'de', 'deu': 'de', 'de': 'de',
+            'eng': 'en', 'en': 'en',
+            'fre': 'fr', 'fra': 'fr', 'fr': 'fr',
+            'spa': 'es', 'es': 'es',
+            'ita': 'it', 'it': 'it',
+            'dut': 'nl', 'nld': 'nl', 'nl': 'nl',
+            'rus': 'ru', 'ru': 'ru',
+            'lat': 'la', 'la': 'la'
+        }
+        
+        # Identify foreign key columns (exclude id, uri, and columns starting with pref_)
         for field in fields:
-            if field not in ['id', 'pref_ger', 'pref_eng', 'uri']:
+            if field not in ['id', 'uri'] and not field.startswith('pref_'):
                 self.combo_fk_col.addItem(field)
 
-        if 'pref_ger' in fields:
-            self.chk_ger.setEnabled(True)
-            self.chk_ger.setChecked(True)
-        if 'pref_eng' in fields:
-            self.chk_eng.setEnabled(True)
-            self.chk_eng.setChecked(True)
+        # Dynamically generate language check boxes based on database columns matching 'pref_XXX'
+        pref_fields = [f for f in fields if f.startswith('pref_')]
+        for col in pref_fields:
+            lang_suffix = col.split('_')[-1]
+            lang_code = LANG_MAP.get(lang_suffix, lang_suffix) # Fallback to suffix as API language code
+            
+            chk = QCheckBox(f"Import {col} ('{lang_code}')")
+            chk.setChecked(True)
+            layout.addWidget(chk)
+            self.lang_checkboxes[col] = (chk, lang_code)
 
     def populate_parent_concepts(self):
         self.combo_parent_term.clear()
@@ -375,9 +402,19 @@ class SkosConnectMultilingualImporter(QDialog):
             label_str = str(val) if val is not None else "Unnamed"
             self.combo_parent_term.addItem(label_str, f['id'])
 
+    def get_tree_language(self):
+        """Determine what language to load concepts inside the tree widget."""
+        # Use first checked language, fallback to 'de' or 'en'
+        for col, (chk, lang_code) in self.lang_checkboxes.items():
+            if chk.isChecked():
+                return lang_code
+        return 'de'
+
     def load_top_concepts(self):
         self.tree.blockSignals(True) 
         self.tree.clear()
+        
+        tree_lang = self.get_tree_language()
         
         if self.radio_online.isChecked():
             self.btn_load.setText("Loading...")
@@ -389,7 +426,7 @@ class SkosConnectMultilingualImporter(QDialog):
             
             try:
                 # Bugfix: Added 10s timeout to prevent infinite blocks if server hangs
-                resp = requests.get(f"{self.base_url}/topConcepts", params={'lang': 'de'}, timeout=10)
+                resp = requests.get(f"{self.base_url}/topConcepts", params={'lang': tree_lang}, timeout=10)
                 resp.raise_for_status()
                 tops = resp.json().get('topconcepts', [])
                 
@@ -457,7 +494,7 @@ class SkosConnectMultilingualImporter(QDialog):
                 
                 for r_uri in roots:
                     concept = self.offline_concepts[r_uri]
-                    label = concept['pref_de'] or concept['pref_en'] or r_uri
+                    label = get_concept_label(concept, tree_lang, r_uri)
                     
                     item = QTreeWidgetItem([label])
                     item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
@@ -483,11 +520,13 @@ class SkosConnectMultilingualImporter(QDialog):
         uri = item.data(0, Qt.UserRole)
         item.removeChild(item.child(0)) 
         
+        tree_lang = self.get_tree_language()
+        
         if self.radio_online.isChecked():
             QApplication.setOverrideCursor(Qt.WaitCursor)
             try:
                 # Bugfix: Added 10s timeout
-                c_resp = requests.get(f"{self.base_url}/children", params={'uri': uri, 'lang': 'de'}, timeout=10)
+                c_resp = requests.get(f"{self.base_url}/children", params={'uri': uri, 'lang': tree_lang}, timeout=10)
                 if c_resp.status_code == 200:
                     children = c_resp.json().get('narrower', [])
                     if not children:
@@ -522,7 +561,7 @@ class SkosConnectMultilingualImporter(QDialog):
                 for c_uri in children_uris:
                     if c_uri in self.offline_concepts:
                         child = self.offline_concepts[c_uri]
-                        label = child['pref_de'] or child['pref_en'] or c_uri
+                        label = get_concept_label(child, tree_lang, c_uri)
                         
                         c_item = QTreeWidgetItem([label])
                         c_item.setFlags(c_item.flags() | Qt.ItemIsUserCheckable)
@@ -600,7 +639,9 @@ class SkosConnectMultilingualImporter(QDialog):
             QMessageBox.critical(self, "Security Halt", f"Target table '{layer.name()}' must have a 'uri' column!")
             return
             
-        if not self.chk_ger.isChecked() and not self.chk_eng.isChecked():
+        # Check if any language is selected
+        any_selected = any(chk.isChecked() for chk, _ in self.lang_checkboxes.values())
+        if not any_selected and self.lang_checkboxes:
             QMessageBox.warning(self, "No Language Selected", "Please select at least one language to import.")
             return
 
@@ -656,20 +697,16 @@ class SkosConnectMultilingualImporter(QDialog):
                 feat = QgsFeature(layer.fields())
                 feat.setAttribute('uri', item['uri'])
                 
-                if self.chk_ger.isChecked() and 'pref_ger' in fields:
-                    if not self.radio_online.isChecked():
-                        ger_label = self.offline_concepts.get(item['uri'], {}).get('pref_de', item['ui_term'])
-                    else:
-                        ger_label = item['ui_term']
-                    feat.setAttribute('pref_ger', ger_label)
-                    
-                if self.chk_eng.isChecked() and 'pref_eng' in fields:
-                    if not self.radio_online.isChecked():
-                        eng_label = self.offline_concepts.get(item['uri'], {}).get('pref_en', '')
-                    else:
-                        # Fetch from api (optimized using a cache)
-                        eng_label = self.fetch_label_from_api(item['uri'], 'en')
-                    feat.setAttribute('pref_eng', eng_label)
+                # Fetch labels dynamically for all checked languages
+                for col, (chk, lang_code) in self.lang_checkboxes.items():
+                    if chk.isChecked() and col in fields:
+                        if not self.radio_online.isChecked():
+                            # Offline lookup
+                            val = get_concept_label(self.offline_concepts.get(item['uri']), lang_code, item['ui_term'])
+                        else:
+                            # Online api lookup
+                            val = self.fetch_label_from_api(item['uri'], lang_code)
+                        feat.setAttribute(col, val)
                     
                 if self.group_fk.isChecked() and fk_col:
                     feat.setAttribute(fk_col, parent_id)

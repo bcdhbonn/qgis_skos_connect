@@ -24,9 +24,43 @@ Even if you translate the label to German ("Frühe Bronzezeit") or English ("Ear
 
 ### 3. Relational Database Design
 Instead of copy-pasting the URI and labels into every single point, line, or polygon in your map:
-1. We import the concepts into a **Lookup Table** (a dictionary table containing `uri`, `pref_ger`, and `pref_eng`).
-2. In our map layer, we only store the short `uri` link.
+1. We import the concepts into a **Lookup Table** (a dictionary table containing `uri` and your preferred language label columns).
+2. In our map layer, we only store the short `uri` link (or integer `id`).
 3. QGIS automatically connects the two and displays the beautiful, translated labels to the user!
+
+---
+
+## 🌍 Dynamic Multilingual Support: Any Language You Need!
+
+Unlike other plugins that only support English and German, **SkosConnect is fully dynamic**. It scans your target database table for columns starting with `pref_` and automatically adjusts.
+
+* **Automatic Column Detection:** If your database table has columns named `pref_ger`, `pref_eng`, `pref_fre`, and `pref_lat`, the plugin will detect them and show four checkboxes:
+  * `Import pref_ger ('de')`
+  * `Import pref_eng ('en')`
+  * `Import pref_fre ('fr')`
+  * `Import pref_lat ('la')`
+* **Adaptive Tree UI:** The concepts in the interactive browse tree will automatically be displayed in the language of the first checked option in your form.
+* **Unified Import:** When you click import, SkosConnect fetches all checked language translations simultaneously from the API or the local SKOS file and writes them to the respective columns in a single transaction.
+
+---
+
+## 🌳 Hierarchical Nesting & Parent-Child Relationships
+
+ नियंत्रित vocabularies often have a nested hierarchy (e.g., "Bronze Age" contains "Early Bronze Age", "Middle Bronze Age", and "Late Bronze Age"). SkosConnect allows you to preserve these relationships in your database.
+
+### How it works (Optional Hierarchy Link)
+In relational database design, you link a child record to its parent using a **Foreign Key (FK)**.
+1. You have a parent lookup table (e.g., `epochs`) containing `"Bronze Age"` with `id = 5`.
+2. Your target lookup table (e.g., `time_periods`) has a foreign key column (e.g., `epoch_id`).
+3. In SkosConnect, check the box **Optional Hierarchy Link**.
+4. Set:
+   * **Parent Table:** `epochs`
+   * **Parent Concept:** `"Bronze Age" (ID: 5)`
+   * **Foreign Key Column:** `epoch_id`
+5. Load the tree, select `"Early Bronze Age"`, `"Middle Bronze Age"`, and `"Late Bronze Age"`, and run the import.
+6. The plugin inserts all three sub-periods into `time_periods` and automatically sets their `epoch_id` column to `5`.
+
+Now, your database knows exactly that these three periods belong under the "Bronze Age"!
 
 ---
 
@@ -52,14 +86,15 @@ If you are a single researcher, don't have access to an IT department to host a 
 ## 🚀 Tutorial 1: Setting up with PostgreSQL/PostGIS
 
 ### Step 1: Create your Lookup Table in PostgreSQL
-Run the following SQL statement in your database management tool (like pgAdmin or the QGIS DB Manager SQL window) to create your vocabulary lookup table:
+Run the following SQL statement in your database management tool (like pgAdmin or the QGIS DB Manager SQL window) to create your vocabulary lookup table. You can customize the language columns:
 
 ```sql
 CREATE TABLE time_periods (
     id SERIAL PRIMARY KEY,
     uri VARCHAR(255) UNIQUE NOT NULL,
     pref_ger VARCHAR(100),
-    pref_eng VARCHAR(100)
+    pref_eng VARCHAR(100),
+    pref_fre VARCHAR(100) -- Example: adding French
 );
 ```
 
@@ -79,9 +114,8 @@ CREATE TABLE excavation_sites (
 2. Click the database plug icon **🔌 SkosConnect** in QGIS (located in the database toolbar or under **Plugins ➡️ SkosConnect**).
 3. **SKOS Source Configuration:** Choose online or offline file.
 4. **1. Target Table:** Select your PostgreSQL table (`time_periods`).
-5. **Language Import Options:** Ensure both German and English checkboxes are checked (the plugin automatically detects that these columns exist in your table!).
-6. **Optional Hierarchy Link:**
-   * If you are importing sub-periods (e.g., "Early Bronze Age") and want to link them to an existing parent category in another table (e.g., "Bronze Age" in `epochs`), check this box and select the parent table, parent concept, and target foreign key column.
+5. **Language Import Options:** Ensure the language checkboxes are checked (the plugin automatically detects `pref_ger`, `pref_eng`, and `pref_fre`!).
+6. **Optional Hierarchy Link:** Configure it if you want to link the imported sub-periods to a parent concept in another table.
 7. Click **Load Top Concepts**, check the items you want to import, and click **3. Write Selected Concepts to Database**.
 
 ---
@@ -93,17 +127,18 @@ CREATE TABLE excavation_sites (
 2. **Database:** Choose a save location and name your file (e.g., `archaeology_data.gpkg`).
 3. **Table name:** Name the table `vocab_periods`.
 4. **Geometry type:** Select **No Geometry** (this is a pure table containing text, not map shapes).
-5. **New Field:** Add the following text columns:
+5. **New Field:** Add the following text columns (feel free to add any languages you need!):
    * Name: `uri`, Type: `Text data`
-   * Name: `pref_ger`, Type: `Text data` (for German labels)
-   * Name: `pref_eng`, Type: `Text data` (for English labels)
+   * Name: `pref_ger`, Type: `Text data`
+   * Name: `pref_eng`, Type: `Text data`
+   * Name: `pref_fre`, Type: `Text data`
 6. Click **Add to Fields List** for each, then click **OK**. You will see the new table in your layers panel.
 
 ### Step 2: Use SkosConnect to Import Concepts
 1. Click the database plug icon **🔌 SkosConnect** in QGIS.
 2. **SKOS Source Configuration:** Choose online or offline file.
 3. **1. Target Table:** Select your newly created `vocab_periods` table.
-4. **Language Import Options:** Ensure both German and English checkboxes are checked.
+4. **Language Import Options:** Check the languages you wish to import.
 5. Click **Load Top Concepts**. Click the arrow keys to expand concepts, check the items you want to import, and click **3. Write Selected Concepts to Database**.
 
 ---
