@@ -2,55 +2,60 @@ from qgis.PyQt.QtWidgets import (QAction, QDialog, QVBoxLayout, QPushButton,
                                 QTreeWidget, QTreeWidgetItem, QMessageBox, 
                                 QApplication, QLabel, QComboBox, QGroupBox, 
                                 QFormLayout, QCheckBox, QHBoxLayout, QWidget, 
-                                QRadioButton, QLineEdit, QFileDialog)
+                                QRadioButton, QLineEdit, QFileDialog, QTextBrowser, QGridLayout)
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtCore import Qt
-from qgis.core import QgsProject, QgsFeature, QgsApplication, QgsMapLayerType, QgsMessageLog, Qgis
+from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.core import (QgsProject, QgsFeature, QgsApplication, QgsMapLayerType, 
+                       QgsMessageLog, Qgis, QgsWkbTypes, QgsCoordinateReferenceSystem, 
+                       QgsCoordinateTransform, QgsPointXY, QgsGeometry)
 import requests
 import os
 import xml.etree.ElementTree as ET
+import re
+import json
 
 # Try to import rdflib for advanced RDF parsing (e.g. Turtle)
 try:
     import rdflib
-    HAS_RDFLIB = True
+    from rdflib.namespace import RDF, SKOS
+    RDFLIB_AVAILABLE = True
 except ImportError:
-    HAS_RDFLIB = False
+    RDFLIB_AVAILABLE = False
 
-# ---------------------------------------------------------
-# OFFLINE RDF/SKOS PARSERS
-# ---------------------------------------------------------
 
-def get_rdflib_format(file_path):
-    """Map file extension to rdflib parser format name."""
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == '.ttl':
-        return 'turtle'
-    elif ext in ['.rdf', '.xml']:
-        return 'xml'
-    elif ext == '.jsonld':
-        return 'json-ld'
-    elif ext == '.nt':
-        return 'nt'
-    return 'xml'
-
-def parse_skos_with_rdflib(file_path, file_format):
-    """Parse SKOS concept hierarchy from file using rdflib, extracting all language labels."""
-    import rdflib
+def parse_skos_with_rdflib(file_path):
+    """Parse SKOS vocabulary using rdflib (supports Turtle, RDF/XML, JSON-LD, etc.)."""
+    if not RDFLIB_AVAILABLE:
+        return None
+        
     g = rdflib.Graph()
-    g.parse(file_path, format=file_format)
-    
+    # Auto-detect format from file extension
+    ext = os.path.splitext(file_path)[-1].lower()
+    fmt = 'xml'
+    if ext in ['.ttl', '.n3']:
+        fmt = 'turtle'
+    elif ext in ['.jsonld', '.json']:
+        fmt = 'json-ld'
+    elif ext in ['.nt']:
+        fmt = 'nt'
+        
+    try:
+        g.parse(file_path, format=fmt)
+    except Exception as e:
+        QgsMessageLog.logMessage(f"rdflib failed parsing {file_path}: {e}", "Plugins", Qgis.Warning)
+        return None
+        
     concepts = {}
-    SKOS = rdflib.Namespace("http://www.w3.org/2004/02/skos/core#")
     
-    # Iterate over all subjects that are instances of skos:Concept
     for s in g.subjects(rdflib.RDF.type, SKOS.Concept):
         uri = str(s)
         concepts[uri] = {
             'uri': uri,
             'labels': {}, # Map of lang_code -> label string
             'narrower': [],
-            'broader': []
+            'broader': [],
+            'exactMatch': [],
+            'closeMatch': []
         }
         
         # Extract all preferred labels
@@ -65,6 +70,12 @@ def parse_skos_with_rdflib(file_path, file_format):
         for parent in g.objects(s, SKOS.broader):
             concepts[uri]['broader'].append(str(parent))
             
+        # Extract matches
+        for m in g.objects(s, SKOS.exactMatch):
+            concepts[uri]['exactMatch'].append(str(m))
+        for m in g.objects(s, SKOS.closeMatch):
+            concepts[uri]['closeMatch'].append(str(m))
+            
     # Ensure all relationships are bidirectional in our model
     for uri, concept in concepts.items():
         for parent_uri in concept['broader']:
@@ -76,40 +87,39 @@ def parse_skos_with_rdflib(file_path, file_format):
                 
     return concepts
 
+
 def parse_skos_rdf_xml(file_path):
-    """Fallback XML parser for standard RDF/XML SKOS files without rdflib, extracting all language labels."""
-    tree = ET.parse(file_path)
-    root = tree.getroot()
-    
+    """Fallback XML parser for SKOS/RDF XML format if rdflib is not installed."""
+    try:
+        tree = ET.parse(file_path)
+        root = tree.getroot()
+    except Exception as e:
+        QgsMessageLog.logMessage(f"XML parsing error: {e}", "Plugins", Qgis.Warning)
+        return {}
+
+    # RDF/XML Namespace definitions
+    RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+    RDF_ABOUT = f"{{{RDF_NS}}}about"
+    RDF_RESOURCE = f"{{{RDF_NS}}}resource"
+
     concepts = {}
     
-    RDF_ABOUT = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}about"
-    RDF_RESOURCE = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}resource"
-    RDF_TYPE = "{http://www.w3.org/1999/02/22-rdf-syntax-ns#}type"
-    SKOS_CONCEPT = "http://www.w3.org/2004/02/skos/core#Concept"
-    
-    for elem in root.iter():
-        is_concept = False
-        if elem.tag.endswith("}Concept"):
-            is_concept = True
-        else:
-            # Check children for rdf:type
-            for child in elem:
-                if child.tag == RDF_TYPE and child.attrib.get(RDF_RESOURCE) == SKOS_CONCEPT:
-                    is_concept = True
-                    break
-        
-        if is_concept:
+    # Iterate over Concept elements in the RDF document
+    for elem in root:
+        local_name = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+        if local_name == 'Concept':
             uri = elem.attrib.get(RDF_ABOUT)
             if not uri:
                 continue
-            
+                
             if uri not in concepts:
                 concepts[uri] = {
                     'uri': uri,
                     'labels': {},
                     'narrower': [],
-                    'broader': []
+                    'broader': [],
+                    'exactMatch': [],
+                    'closeMatch': []
                 }
             
             concept = concepts[uri]
@@ -134,6 +144,14 @@ def parse_skos_rdf_xml(file_path):
                     parent_uri = child.attrib.get(RDF_RESOURCE)
                     if parent_uri:
                         concept['broader'].append(parent_uri)
+                elif local_name == 'exactMatch':
+                    match_uri = child.attrib.get(RDF_RESOURCE)
+                    if match_uri:
+                        concept['exactMatch'].append(match_uri)
+                elif local_name == 'closeMatch':
+                    match_uri = child.attrib.get(RDF_RESOURCE)
+                    if match_uri:
+                        concept['closeMatch'].append(match_uri)
                         
     # Ensure all relationships are bidirectional in our model
     for uri, concept in concepts.items():
@@ -143,8 +161,9 @@ def parse_skos_rdf_xml(file_path):
         for child_uri in concept['narrower']:
             if child_uri in concepts and uri not in concepts[child_uri]['broader']:
                 concepts[child_uri]['broader'].append(uri)
-                
+
     return concepts
+
 
 def find_roots(concepts):
     """Find root concepts (those that have no parent/broader concepts)."""
@@ -163,7 +182,8 @@ def find_roots(concepts):
         roots = list(concepts.keys())
     return roots
 
-def get_concept_label(concept, lang_code, fallback_uri):
+
+def get_concept_label(concept, lang_code, fallback_uri, fallback_mode="en"):
     """Extract preferred label from concept dict matching the given language code, with fallbacks."""
     if not concept:
         return fallback_uri
@@ -174,23 +194,91 @@ def get_concept_label(concept, lang_code, fallback_uri):
     for l, val in labels.items():
         if l.startswith(lang_code) or lang_code.startswith(l):
             return val
-    # Fallbacks
-    for l in ['en', 'de', 'default']:
-        if l in labels:
-            return labels[l]
-    if labels:
-        return list(labels.values())[0]
-    return fallback_uri
+    # Fallback mode check
+    if fallback_mode == "uri":
+        return fallback_uri
+    elif fallback_mode == "first":
+        if labels:
+            return list(labels.values())[0]
+        return fallback_uri
+    else:
+        # Specific language fallback (e.g. 'en', 'de', etc.)
+        if fallback_mode in labels:
+            return labels[fallback_mode]
+        # Fallback to default/english if selected fallback is missing
+        for l in [fallback_mode, 'en', 'de', 'default']:
+            if l in labels:
+                return labels[l]
+        if labels:
+            return list(labels.values())[0]
+        return fallback_uri
 
 
 # ---------------------------------------------------------
 # DIALOG WINDOW IMPLEMENTATION
 # ---------------------------------------------------------
+class SchemaSetupDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("🔧 Setup Database Columns for LOD")
+        self.resize(450, 320)
+        layout = QVBoxLayout(self)
+        
+        layout.addWidget(QLabel("Select columns to add to your target table:"))
+        
+        # Group for languages
+        self.gp_langs = QGroupBox("Preferred Labels (Languages)")
+        langs_layout = QGridLayout(self.gp_langs)
+        self.chk_de = QCheckBox("German (pref_ger)")
+        self.chk_en = QCheckBox("English (pref_eng)")
+        self.chk_fr = QCheckBox("French (pref_fre)")
+        self.chk_es = QCheckBox("Spanish (pref_spa)")
+        self.chk_la = QCheckBox("Latin (pref_lat)")
+        
+        self.chk_de.setChecked(True)
+        self.chk_en.setChecked(True)
+        
+        langs_layout.addWidget(self.chk_de, 0, 0)
+        langs_layout.addWidget(self.chk_en, 0, 1)
+        langs_layout.addWidget(self.chk_fr, 1, 0)
+        langs_layout.addWidget(self.chk_es, 1, 1)
+        langs_layout.addWidget(self.chk_la, 2, 0)
+        layout.addWidget(self.gp_langs)
+        
+        # Group for LOD
+        self.gp_lod = QGroupBox("Linked Open Data & Enrichment")
+        lod_layout = QVBoxLayout(self.gp_lod)
+        self.chk_wiki = QCheckBox("Wikidata URI (wikidata)")
+        self.chk_wiki_desc = QCheckBox("Wikidata Description (wikidata_desc)")
+        self.chk_gnd = QCheckBox("GND URI (gnd)")
+        self.chk_aat = QCheckBox("AAT URI (aat)")
+        
+        self.chk_wiki.setChecked(True)
+        self.chk_gnd.setChecked(True)
+        self.chk_aat.setChecked(True)
+        
+        lod_layout.addWidget(self.chk_wiki)
+        lod_layout.addWidget(self.chk_wiki_desc)
+        lod_layout.addWidget(self.chk_gnd)
+        lod_layout.addWidget(self.chk_aat)
+        layout.addWidget(self.gp_lod)
+        
+        # Buttons
+        btns_layout = QHBoxLayout()
+        self.btn_ok = QPushButton("Add Columns")
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+        btns_layout.addWidget(self.btn_ok)
+        btns_layout.addWidget(self.btn_cancel)
+        layout.addLayout(btns_layout)
+
+
 class SkosConnectMultilingualImporter(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("🔌 SkosConnect: Multilingual LOD Import")
-        self.resize(700, 950)
+        self.resize(950, 850)
         self.layout = QVBoxLayout()
 
         # 0. Source Configuration
@@ -234,14 +322,40 @@ class SkosConnectMultilingualImporter(QDialog):
 
         # 1. Target Table Selection
         self.layout.addWidget(QLabel("1. Target Table (Requires 'uri' column):"))
+        target_layout = QHBoxLayout()
         self.combo_target_layer = QComboBox()
         self.combo_target_layer.currentIndexChanged.connect(self.on_target_layer_changed)
-        self.layout.addWidget(self.combo_target_layer)
+        target_layout.addWidget(self.combo_target_layer, 4)
+        
+        self.btn_setup_schema = QPushButton("🔧 Setup Columns")
+        self.btn_setup_schema.clicked.connect(self.setup_table_schema)
+        target_layout.addWidget(self.btn_setup_schema, 1)
+        
+        self.layout.addLayout(target_layout)
 
         # Dynamic Language Selection (Populated dynamically based on database columns)
         self.group_lang = QGroupBox("Language Import Options (Detected from Table Columns)")
+        group_lang_layout = QVBoxLayout()
         self.lang_layout = QHBoxLayout()
-        self.group_lang.setLayout(self.lang_layout)
+        group_lang_layout.addLayout(self.lang_layout)
+        
+        # Fallback configuration
+        fallback_layout = QHBoxLayout()
+        fallback_layout.addWidget(QLabel("When preferred language is missing, fallback to:"))
+        self.combo_fallback_lang = QComboBox()
+        self.combo_fallback_lang.addItem("URI (No label fallback)", "uri")
+        self.combo_fallback_lang.addItem("English ('en')", "en")
+        self.combo_fallback_lang.addItem("German ('de')", "de")
+        self.combo_fallback_lang.addItem("French ('fr')", "fr")
+        self.combo_fallback_lang.addItem("Spanish ('es')", "es")
+        self.combo_fallback_lang.addItem("Latin ('la')", "la")
+        self.combo_fallback_lang.addItem("First available label", "first")
+        self.combo_fallback_lang.setCurrentIndex(1) # Default to English 'en'
+        fallback_layout.addWidget(self.combo_fallback_lang)
+        fallback_layout.addStretch()
+        
+        group_lang_layout.addLayout(fallback_layout)
+        self.group_lang.setLayout(group_lang_layout)
         self.layout.addWidget(self.group_lang)
 
         # Optional Foreign Key Link
@@ -266,22 +380,50 @@ class SkosConnectMultilingualImporter(QDialog):
         # 2. Browse Vocabulary
         self.layout.addWidget(QLabel("\n2. Browse Vocabulary:"))
         
+        # Horizontal widget split for tree and preview
+        browse_widget = QWidget()
+        browse_layout = QHBoxLayout(browse_widget)
+        browse_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Left container
+        left_container = QWidget()
+        left_layout = QVBoxLayout(left_container)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        
         # Option to select sub-concepts recursively
         self.chk_auto_select_children = QCheckBox("Auto-select child concepts recursively (deselects parent)")
         self.chk_auto_select_children.setChecked(False)
-        self.layout.addWidget(self.chk_auto_select_children)
+        left_layout.addWidget(self.chk_auto_select_children)
 
         self.tree = QTreeWidget()
         self.tree.setHeaderLabels(["Skosmos Concepts"])
         self.tree.itemExpanded.connect(self.on_item_expanded)
         self.tree.itemChanged.connect(self.on_item_changed) 
-        self.layout.addWidget(self.tree)
+        self.tree.currentItemChanged.connect(self.on_current_item_changed)
+        left_layout.addWidget(self.tree)
 
         self.btn_load = QPushButton("Load Top Concepts")
         self.btn_load.clicked.connect(self.load_top_concepts)
-        self.layout.addWidget(self.btn_load)
+        left_layout.addWidget(self.btn_load)
+        
+        browse_layout.addWidget(left_container, 3)
+        
+        # Right container (Preview Panel)
+        self.preview_box = QGroupBox("Concept Preview")
+        preview_layout = QVBoxLayout(self.preview_box)
+        self.txt_preview = QTextBrowser()
+        self.txt_preview.setOpenExternalLinks(True)
+        preview_layout.addWidget(self.txt_preview)
+        
+        browse_layout.addWidget(self.preview_box, 2)
+        
+        self.layout.addWidget(browse_widget)
 
-        # 3. Import Button
+        # 3. Import Options & Button
+        self.chk_update_existing = QCheckBox("Update/Sync existing concepts in database (match by URI)")
+        self.chk_update_existing.setChecked(False)
+        self.layout.addWidget(self.chk_update_existing)
+
         self.btn_import = QPushButton("3. Write Selected Concepts to Database")
         self.btn_import.clicked.connect(self.import_to_qgis)
         self.btn_import.setEnabled(False)
@@ -292,6 +434,7 @@ class SkosConnectMultilingualImporter(QDialog):
         self.base_url = "https://skosmos.dbprojects.uni-bonn.de/rest/v1/hector"
         self.offline_concepts = {}
         self.label_cache = {}
+        self.concept_details_cache = {}
         self.lang_checkboxes = {} # Mapping: column_name -> (QCheckBox, lang_code)
         
         self.populate_layers()
@@ -340,8 +483,8 @@ class SkosConnectMultilingualImporter(QDialog):
     def on_target_layer_changed(self):
         self.combo_fk_col.clear()
         
-        # Clear dynamically generated checkboxes
-        layout = self.group_lang.layout()
+        # Clear dynamically generated checkboxes in self.lang_layout
+        layout = self.lang_layout
         while layout.count():
             child = layout.takeAt(0)
             if child.widget():
@@ -384,23 +527,290 @@ class SkosConnectMultilingualImporter(QDialog):
             layout.addWidget(chk)
             self.lang_checkboxes[col] = (chk, lang_code)
 
+    def setup_table_schema(self):
+        layer_id = self.combo_target_layer.currentData()
+        if not layer_id:
+            QMessageBox.warning(self, "Warning", "Please select a target table first.")
+            return
+        layer = QgsProject.instance().mapLayer(layer_id)
+        if not layer:
+            QMessageBox.warning(self, "Warning", "Selected layer not found.")
+            return
+            
+        dlg = SchemaSetupDialog(self)
+        if dlg.exec_() == QDialog.Accepted:
+            # We want to add fields
+            field_configs = []
+            if dlg.chk_de.isChecked(): field_configs.append(('pref_ger', QVariant.String, 100))
+            if dlg.chk_en.isChecked(): field_configs.append(('pref_eng', QVariant.String, 100))
+            if dlg.chk_fr.isChecked(): field_configs.append(('pref_fre', QVariant.String, 100))
+            if dlg.chk_es.isChecked(): field_configs.append(('pref_spa', QVariant.String, 100))
+            if dlg.chk_la.isChecked(): field_configs.append(('pref_lat', QVariant.String, 100))
+            
+            if dlg.chk_wiki.isChecked(): field_configs.append(('wikidata', QVariant.String, 255))
+            if dlg.chk_wiki_desc.isChecked(): field_configs.append(('wikidata_desc', QVariant.String, 1000))
+            if dlg.chk_gnd.isChecked(): field_configs.append(('gnd', QVariant.String, 255))
+            if dlg.chk_aat.isChecked(): field_configs.append(('aat', QVariant.String, 255))
+                
+            # Check what fields already exist
+            existing = layer.fields().names()
+            
+            # Start editing session
+            if not layer.isEditable() and not layer.startEditing():
+                QMessageBox.critical(self, "Edit Error", f"Could not start editing on layer '{layer.name()}'. Is it read-only?")
+                return
+                
+            from qgis.core import QgsField
+            added_count = 0
+            for name, ftype, length in field_configs:
+                if name not in existing:
+                    field = QgsField(name, ftype, "varchar", length)
+                    if layer.addAttribute(field):
+                        added_count += 1
+                        
+            if added_count > 0:
+                if layer.commitChanges():
+                    QMessageBox.information(self, "Success", f"Successfully added {added_count} columns to '{layer.name()}'!")
+                    self.on_target_layer_changed() # Refresh fields mapping
+                else:
+                    layer.rollBack()
+                    QMessageBox.critical(self, "Error", f"Failed to commit column changes to database.")
+            else:
+                layer.rollBack()
+                QMessageBox.information(self, "Information", "All selected columns already exist in the table.")
+
+    def fetch_wikidata_details(self, wikidata_id):
+        """Fetch details (descriptions in various languages, coordinates, GND, AAT) from Wikidata API."""
+        url = f"https://www.wikidata.org/wiki/Special:EntityData/{wikidata_id}.json"
+        headers = {"User-Agent": "SkosConnectQgisPlugin/1.0 (contact: bcdh@uni-bonn.de)"}
+        try:
+            resp = requests.get(url, headers=headers, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                entity = data.get("entities", {}).get(wikidata_id, {})
+                
+                # Fetch descriptions in common languages
+                descriptions = {}
+                for lang in ["de", "en", "fr", "es", "la"]:
+                    descriptions[lang] = entity.get("descriptions", {}).get(lang, {}).get("value", "")
+                
+                # Coordinates (P625)
+                lat, lon = None, None
+                claims = entity.get("claims", {})
+                p625 = claims.get("P625", [])
+                if p625:
+                    mainsnak = p625[0].get("mainsnak", {})
+                    datavalue = mainsnak.get("datavalue", {})
+                    value = datavalue.get("value", {})
+                    lat = value.get("latitude")
+                    lon = value.get("longitude")
+                    
+                # GND ID (P227)
+                gnd_val = None
+                p227 = claims.get("P227", [])
+                if p227:
+                    gnd_val = p227[0].get("mainsnak", {}).get("datavalue", {}).get("value")
+                    
+                # AAT ID (P1014)
+                aat_val = None
+                p1014 = claims.get("P1014", [])
+                if p1014:
+                    aat_val = p1014[0].get("mainsnak", {}).get("datavalue", {}).get("value")
+                    
+                return {
+                    "descriptions": descriptions,
+                    "latitude": lat,
+                    "longitude": lon,
+                    "gnd_id": gnd_val,
+                    "aat_id": aat_val
+                }
+        except Exception as e:
+            QgsMessageLog.logMessage(f"SkosConnect: Wikidata API error for {wikidata_id}: {e}", "Plugins", Qgis.Warning)
+        return {}
+
+    def fetch_gnd_details(self, gnd_id):
+        """Fetch details (coordinates) from Lobid GND API."""
+        url = f"https://lobid.org/gnd/{gnd_id}.json"
+        try:
+            resp = requests.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                
+                lat, lon = None, None
+                # Check hasGeometry
+                has_geometry = data.get("hasGeometry", [])
+                if has_geometry:
+                    as_wkt_list = has_geometry[0].get("asWKT", [])
+                    if as_wkt_list:
+                        wkt = as_wkt_list[0]
+                        m = re.search(r'Point\s*\(\s*([+-]?\d+\.?\d*)\s+([+-]?\d+\.?\d*)\s*\)', wkt, re.IGNORECASE)
+                        if m:
+                            lon = float(m.group(1))
+                            lat = float(m.group(2))
+                            
+                return {
+                    "latitude": lat,
+                    "longitude": lon
+                }
+        except Exception as e:
+            QgsMessageLog.logMessage(f"SkosConnect: Lobid GND API error for {gnd_id}: {e}", "Plugins", Qgis.Warning)
+        return {}
+
+    def on_current_item_changed(self, current, previous):
+        if not current:
+            self.txt_preview.clear()
+            return
+            
+        uri = current.data(0, Qt.UserRole)
+        if not uri or uri in ["...loading sub-concepts...", "(No sub-concepts)"]:
+            self.txt_preview.clear()
+            return
+            
+        self.show_concept_preview(uri)
+
+    def show_concept_preview(self, uri):
+        self.txt_preview.setHtml(f"<h4>Concept Details</h4><p>URI: <code>{uri}</code></p><p><i>Loading details...</i></p>")
+        QApplication.processEvents()
+        
+        # 1. Fetch details (either from cache or API/file)
+        details = self.get_concept_details(uri)
+        if not details:
+            self.txt_preview.setHtml(f"<h4>Concept Details</h4><p>URI: <code>{uri}</code></p><p><i>No details found.</i></p>")
+            return
+            
+        # 2. Build nice HTML
+        html = "<div style='font-family: sans-serif; font-size: 11px;'>"
+        html += f"<h3>{details.get('pref_label', 'Concept Details')}</h3>"
+        html += f"<p><b>URI:</b><br/><a href='{uri}'>{uri}</a></p>"
+        
+        # Labels in different languages
+        labels = details.get("labels", {})
+        if labels:
+            html += "<p><b>Labels:</b><br/>"
+            for lang, val in labels.items():
+                html += f"• <code>{lang}</code>: {val}<br/>"
+            html += "</p>"
+            
+        # Matches
+        exact_matches = details.get("exactMatch", [])
+        close_matches = details.get("closeMatch", [])
+        
+        if exact_matches:
+            html += "<p><b>exactMatch (LOD):</b><br/>"
+            for m in exact_matches:
+                html += f"• <a href='{m}'>{m}</a><br/>"
+            html += "</p>"
+            
+        if close_matches:
+            html += "<p><b>closeMatch (LOD):</b><br/>"
+            for m in close_matches:
+                html += f"• <a href='{m}'>{m}</a><br/>"
+            html += "</p>"
+            
+        html += "</div>"
+        self.txt_preview.setHtml(html)
+
+    def get_concept_details(self, uri):
+        # Use cache if present
+        if hasattr(self, 'concept_details_cache') and uri in self.concept_details_cache:
+            return self.concept_details_cache[uri]
+            
+        if not hasattr(self, 'concept_details_cache'):
+            self.concept_details_cache = {}
+            
+        details = {
+            "uri": uri,
+            "pref_label": "",
+            "labels": {},
+            "exactMatch": [],
+            "closeMatch": []
+        }
+        
+        if not self.radio_online.isChecked():
+            # Offline mode: extract from self.offline_concepts
+            concept = self.offline_concepts.get(uri)
+            if concept:
+                details["labels"] = concept.get("labels", {})
+                details["exactMatch"] = concept.get("exactMatch", [])
+                details["closeMatch"] = concept.get("closeMatch", [])
+                details["pref_label"] = get_concept_label(concept, self.get_tree_language(), uri)
+        else:
+            # Online mode: fetch from Skosmos /data
+            try:
+                resp = requests.get(f"{self.base_url}/data", params={"uri": uri}, headers={"Accept": "application/json"}, timeout=3)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    graph = data.get("graph", [])
+                    
+                    # Look for our concept node
+                    concept_node = None
+                    for node in graph:
+                        if node.get("uri") == uri or node.get("id") == uri:
+                            concept_node = node
+                            break
+                            
+                    if concept_node:
+                        # Extract prefLabels
+                        pref_labels = concept_node.get("prefLabel")
+                        if pref_labels:
+                            if isinstance(pref_labels, list):
+                                for pl in pref_labels:
+                                    if isinstance(pl, dict):
+                                        lang = pl.get("lang") or pl.get("@language") or "default"
+                                        val = pl.get("value") or pl.get("@value")
+                                        if val: details["labels"][lang.lower()] = val
+                                    elif isinstance(pl, str):
+                                        details["labels"]["default"] = pl
+                            elif isinstance(pref_labels, dict):
+                                lang = pref_labels.get("lang") or pref_labels.get("@language") or "default"
+                                val = pref_labels.get("value") or pref_labels.get("@value")
+                                if val: details["labels"][lang.lower()] = val
+                            elif isinstance(pref_labels, str):
+                                details["labels"]["default"] = pref_labels
+                                
+                        # Set preferred label for preview title
+                        details["pref_label"] = get_concept_label(details, self.get_tree_language(), uri)
+                        
+                        # Extract matches
+                        details["exactMatch"] = self.extract_property_uris(concept_node, "exactMatch")
+                        details["closeMatch"] = self.extract_property_uris(concept_node, "closeMatch")
+            except Exception as e:
+                QgsMessageLog.logMessage(f"SkosConnect: Error getting concept details for {uri}: {e}", "Plugins", Qgis.Warning)
+                details["pref_label"] = uri
+                
+        self.concept_details_cache[uri] = details
+        return details
+
+    def extract_property_uris(self, item, key):
+        uris = []
+        for k in [key, f"skos:{key}", f"http://www.w3.org/2004/02/skos/core#{key}"]:
+            val = item.get(k)
+            if val:
+                if isinstance(val, list):
+                    for v in val:
+                        if isinstance(v, dict):
+                            uris.append(v.get("uri") or v.get("value") or v.get("@id"))
+                        elif isinstance(v, str):
+                            uris.append(v)
+                elif isinstance(val, dict):
+                    uris.append(val.get("uri") or val.get("value") or val.get("@id"))
+                elif isinstance(val, str):
+                    uris.append(val)
+        return [u for u in uris if u]
+
     def populate_parent_concepts(self):
         self.combo_parent_term.clear()
         layer_id = self.combo_parent_layer.currentData()
         if not layer_id: return
         layer = QgsProject.instance().mapLayer(layer_id)
         if not layer: return
-            
-        fields = layer.fields().names()
-        if 'id' not in fields or ('pref_ger' not in fields and 'term' not in fields):
-            self.combo_parent_term.addItem("Invalid table (missing id or label)")
-            return
-
-        label_col = 'pref_ger' if 'pref_ger' in fields else 'term'
+        
+        # Populate parent concept terms
         for f in layer.getFeatures():
-            val = f[label_col]
-            label_str = str(val) if val is not None else "Unnamed"
-            self.combo_parent_term.addItem(label_str, f['id'])
+            uri = f['uri']
+            if uri:
+                label = f.attribute('pref_ger') or f.attribute('pref_eng') or uri
+                self.combo_parent_term.addItem(label, uri)
 
     def get_tree_language(self):
         """Determine what language to load concepts inside the tree widget."""
@@ -465,7 +875,7 @@ class SkosConnectMultilingualImporter(QDialog):
             try:
                 ext = os.path.splitext(file_path)[1].lower()
                 
-                if ext == '.ttl' and not HAS_RDFLIB:
+                if ext == '.ttl' and not RDFLIB_AVAILABLE:
                     QMessageBox.warning(self, "Library Missing", 
                                         "Turtle (.ttl) files require the 'rdflib' library.\n"
                                         "Please install 'rdflib' (e.g. via OSGeo4W Shell: pip3 install rdflib) "
@@ -476,9 +886,8 @@ class SkosConnectMultilingualImporter(QDialog):
                     return
                 
                 # Parse depending on rdflib availability
-                if HAS_RDFLIB:
-                    fmt = get_rdflib_format(file_path)
-                    self.offline_concepts = parse_skos_with_rdflib(file_path, fmt)
+                if RDFLIB_AVAILABLE:
+                    self.offline_concepts = parse_skos_with_rdflib(file_path)
                 else:
                     self.offline_concepts = parse_skos_rdf_xml(file_path)
                 
@@ -650,7 +1059,6 @@ class SkosConnectMultilingualImporter(QDialog):
         if self.group_fk.isChecked():
             fk_col = self.combo_fk_col.currentText()
             parent_id = self.combo_parent_term.currentData()
-            # parent_id might be 0, so compare with None
             if not fk_col or parent_id is None:
                 QMessageBox.critical(self, "Error", "Foreign Key configuration is incomplete.")
                 return
@@ -677,64 +1085,175 @@ class SkosConnectMultilingualImporter(QDialog):
             QMessageBox.warning(self, "Empty Selection", "No concepts selected!")
             return
 
-        existing_uris = [f['uri'] for f in layer.getFeatures() if f['uri']]
+        existing_features = {f['uri']: f for f in layer.getFeatures() if f['uri']}
         
         features_to_add = []
+        features_to_update = []
         skipped_count = 0
+        updated_count = 0
 
         self.btn_import.setEnabled(False)
         QApplication.setOverrideCursor(Qt.WaitCursor)
+
+        is_spatial = layer.isSpatial()
 
         try:
             for index, item in enumerate(checked_items, 1):
                 self.btn_import.setText(f"Processing Concept {index} of {total_items}...")
                 QApplication.processEvents() 
 
-                if item['uri'] in existing_uris:
-                    skipped_count += 1
-                    continue
-                    
-                feat = QgsFeature(layer.fields())
-                feat.setAttribute('uri', item['uri'])
+                is_update = item['uri'] in existing_features
+                if is_update:
+                    if not self.chk_update_existing.isChecked():
+                        skipped_count += 1
+                        continue
+                    feat = existing_features[item['uri']]
+                else:
+                    feat = QgsFeature(layer.fields())
+                    feat.setAttribute('uri', item['uri'])
                 
-                # Fetch labels dynamically for all checked languages
+                # Fetch details for matches & labels
+                details = self.get_concept_details(item['uri'])
+                exact_matches = details.get("exactMatch", [])
+                close_matches = details.get("closeMatch", [])
+                all_matches = exact_matches + close_matches
+                
+                # Identify external IDs
+                wikidata_id = None
+                for m in all_matches:
+                    if "wikidata.org" in m:
+                        qid_match = re.search(r'Q\d+', m)
+                        if qid_match:
+                            wikidata_id = qid_match.group(0)
+                            break
+                            
+                gnd_id = None
+                for m in all_matches:
+                    if "d-nb.info/gnd" in m:
+                        parts = m.rstrip('/').split('/')
+                        if parts:
+                            gnd_id = parts[-1]
+                            break
+                
+                # Fetch rich LOD info if columns exist or layer is spatial
+                wiki_details = {}
+                gnd_details = {}
+                
+                need_wikidata = ('wikidata_desc' in fields) or ('aat' in fields) or ('gnd' in fields) or (is_spatial)
+                
+                if wikidata_id and need_wikidata:
+                    wiki_details = self.fetch_wikidata_details(wikidata_id)
+                if gnd_id and is_spatial:
+                    gnd_details = self.fetch_gnd_details(gnd_id)
+                    
+                # Extract coordinates
+                lat, lon = None, None
+                if gnd_details.get("latitude") is not None:
+                    lat = gnd_details["latitude"]
+                    lon = gnd_details["longitude"]
+                elif wiki_details.get("latitude") is not None:
+                    lat = wiki_details["latitude"]
+                    lon = wiki_details["longitude"]
+                    
+                # Create geometry if spatial
+                geom = None
+                if is_spatial and lat is not None and lon is not None:
+                    point = QgsPointXY(lon, lat)
+                    if layer.crs().authid() != "EPSG:4326":
+                        try:
+                            source_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+                            transform = QgsCoordinateTransform(source_crs, layer.crs(), QgsProject.instance())
+                            point = transform.transform(point)
+                        except Exception as tr_err:
+                            QgsMessageLog.logMessage(f"SkosConnect: CRS transform error: {tr_err}", "Plugins", Qgis.Warning)
+                    geom = QgsGeometry.fromPointXY(point)
+
+                # Set labels dynamically for checked languages
+                fallback_mode = self.combo_fallback_lang.currentData()
                 for col, (chk, lang_code) in self.lang_checkboxes.items():
                     if chk.isChecked() and col in fields:
-                        if not self.radio_online.isChecked():
-                            # Offline lookup
-                            val = get_concept_label(self.offline_concepts.get(item['uri']), lang_code, item['ui_term'])
-                        else:
-                            # Online api lookup
-                            val = self.fetch_label_from_api(item['uri'], lang_code)
+                        val = details.get("labels", {}).get(lang_code, "")
+                        if not val:
+                            val = get_concept_label(details, lang_code, item['ui_term'], fallback_mode)
                         feat.setAttribute(col, val)
+                    
+                # Set matches fields
+                if 'wikidata' in fields:
+                    wiki_uri = next((m for m in all_matches if "wikidata.org" in m), "")
+                    if not wiki_uri and wikidata_id:
+                        wiki_uri = f"http://www.wikidata.org/entity/{wikidata_id}"
+                    feat.setAttribute('wikidata', wiki_uri)
+                    
+                if 'gnd' in fields:
+                    gnd_uri = next((m for m in all_matches if "d-nb.info/gnd" in m), "")
+                    if not gnd_uri and wiki_details.get("gnd_id"):
+                        gnd_uri = f"http://d-nb.info/gnd/{wiki_details['gnd_id']}"
+                    feat.setAttribute('gnd', gnd_uri)
+                    
+                if 'aat' in fields:
+                    aat_uri = next((m for m in all_matches if "vocab.getty.edu/aat" in m), "")
+                    if not aat_uri and wiki_details.get("aat_id"):
+                        aat_uri = f"http://vocab.getty.edu/aat/{wiki_details['aat_id']}"
+                    feat.setAttribute('aat', aat_uri)
+                    
+                # Set enrichment columns
+                if 'wikidata_desc' in fields:
+                    desc_dict = {}
+                    for col, (chk, lang_code) in self.lang_checkboxes.items():
+                        if chk.isChecked():
+                            desc_val = wiki_details.get("descriptions", {}).get(lang_code, "")
+                            if desc_val:
+                                desc_dict[lang_code] = desc_val
+                    # Fallback to English description if empty
+                    if not desc_dict and wiki_details.get("descriptions", {}).get("en"):
+                        desc_dict["en"] = wiki_details["descriptions"]["en"]
+                    feat.setAttribute('wikidata_desc', json.dumps(desc_dict, ensure_ascii=False))
                     
                 if self.group_fk.isChecked() and fk_col:
                     feat.setAttribute(fk_col, parent_id)
                     
-                features_to_add.append(feat)
+                if is_spatial and geom:
+                    feat.setGeometry(geom)
+                    
+                if is_update:
+                    features_to_update.append(feat)
+                else:
+                    features_to_add.append(feat)
 
-            if features_to_add:
+            if features_to_add or features_to_update:
                 self.btn_import.setText("Writing to Database...")
                 QApplication.processEvents()
                 
-                # Bugfix: Start editing session safely
                 if not layer.isEditable() and not layer.startEditing():
                     QMessageBox.critical(self, "Edit Error", f"Could not start editing on layer '{layer.name()}'. Is it read-only?")
                     return
                 
-                success = layer.addFeatures(features_to_add)
+                # Update existing
+                if features_to_update:
+                    for f in features_to_update:
+                        layer.updateFeature(f)
+                    updated_count = len(features_to_update)
+                    
+                # Add new
+                added_count = 0
+                if features_to_add:
+                    success = layer.addFeatures(features_to_add)
+                    if success:
+                        added_count = len(features_to_add)
                 
-                # Bugfix: Validate both features added AND changes committed successfully
-                if success and layer.commitChanges():
-                    msg = f"✅ {len(features_to_add)} concepts imported to '{layer.name()}'!"
+                if layer.commitChanges():
+                    msg = "✅ Concept Import completed!"
+                    if added_count > 0:
+                        msg += f"\n- {added_count} concepts imported."
+                    if updated_count > 0:
+                        msg += f"\n- {updated_count} concepts updated."
                     if skipped_count > 0:
-                        msg += f"\n⚠️ {skipped_count} concepts skipped (already in database)."
+                        msg += f"\n⚠️ {skipped_count} concepts skipped."
                     QMessageBox.information(self, "Success", msg)
                 else:
-                    # Retrieve database commit errors
                     commit_errs = layer.commitErrors()
                     layer.rollBack()
-                    err_msg = "\n".join(commit_errs) if commit_errs else "Database rejected the insert (Constraint violation?)."
+                    err_msg = "\n".join(commit_errs) if commit_errs else "Database rejected the updates."
                     QMessageBox.critical(self, "Database Error", f"Failed to save changes:\n{err_msg}")
             else:
                 QMessageBox.warning(self, "Nothing to do", "All selected concepts already exist in this table!")
