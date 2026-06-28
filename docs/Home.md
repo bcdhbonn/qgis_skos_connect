@@ -1,4 +1,4 @@
-# Welcome to the SkosConnect Wiki
+# <img src="https://raw.githubusercontent.com/bcdhbonn/qgis_skos_connect/main/icon.svg" width="32" height="32" align="center" /> Welcome to the SkosConnect Wiki
 
 **SkosConnect** is a user-friendly QGIS plugin designed to import controlled vocabularies directly from a Skosmos online API or an offline SKOS/RDF file into database layers (like PostgreSQL/PostGIS or a local **GeoPackage**).
 
@@ -43,8 +43,8 @@ Instead of copying the URI, English label, and German label into every single po
 ---
 
 ## 📖 Wiki Navigation
-* [Installation Guide](Installation.md)
-* [Database Setup (PostgreSQL vs. GeoPackage)](Database-Setup.md)
-* [Your First Import Tutorial](Import-Tutorial.md)
-* [Enrichment & LOD (Wikidata, GND, AAT)](Enrichment-and-LOD.md)
-* [QGIS Form Widget Integration](QGIS-Integration.md)
+* [**Installation & Requirements**](Installation-&-Requirements)
+* [**Database Target Layer Setup**](Database-Setup)
+* [**Step-by-Step Import Tutorial**](Import-Tutorial)
+* [**Enrichment & LOD Features**](Enrichment-and-LOD)
+* [**QGIS Form Widget Integration**](QGIS-Integration)
