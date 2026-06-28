@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Connection lines -->
+  <line x1="16" y1="12" x2="8" y2="24" stroke="#7f8c8d" stroke-width="2" stroke-linecap="round"/>
+  <line x1="16" y1="12" x2="24" y2="24" stroke="#7f8c8d" stroke-width="2" stroke-linecap="round"/>
+  <line x1="16" y1="12" x2="16" y2="24" stroke="#7f8c8d" stroke-width="2" stroke-linecap="round"/>
+
+  <!-- Database cylinder in center/top -->
+  <!-- Top ellipse -->
+  <ellipse cx="16" cy="6" rx="6" ry="2.5" fill="#3498db" stroke="#2980b9" stroke-width="1.5"/>
+  <!-- Middle cylinder divider -->
+  <path d="M10 6v5c0 1.38 2.69 2.5 6 2.5s6-1.12 6-2.5V6" fill="#3498db" stroke="#2980b9" stroke-width="1.5" stroke-linejoin="round"/>
+  <!-- Bottom part of cylinder -->
+  <path d="M10 11v5c0 1.38 2.69 2.5 6 2.5s6-1.12 6-2.5v-5" fill="#3498db" stroke="#2980b9" stroke-width="1.5" stroke-linejoin="round"/>
+  
+  <!-- Outer LOD Nodes (Wikidata, GND, AAT) -->
+  <!-- Wikidata Node (Left) -->
+  <circle cx="8" cy="24" r="3.5" fill="#e74c3c" stroke="#c0392b" stroke-width="1.5"/>
+  <!-- GND Node (Middle) -->
+  <circle cx="16" cy="24" r="3.5" fill="#2ecc71" stroke="#27ae60" stroke-width="1.5"/>
+  <!-- AAT Node (Right) -->
+  <circle cx="24" cy="24" r="3.5" fill="#f1c40f" stroke="#f39c12" stroke-width="1.5"/>
+
+  <!-- Central connection point -->
+  <circle cx="16" cy="12" r="2.5" fill="#2c3e50"/>
+</svg>

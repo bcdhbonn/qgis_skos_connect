@@ -1275,8 +1275,9 @@ class SkosConnectPlugin:
         self.dialog = None
 
     def initGui(self):
-        # Retrieve QGIS theme icon for database connections
-        icon = QgsApplication.getThemeIcon("/mActionAddWfsLayer.svg")
+        # Retrieve custom SVG icon from plugin directory
+        icon_path = os.path.join(os.path.dirname(__file__), "icon.svg")
+        icon = QIcon(icon_path)
         
         self.action = QAction(icon, "SkosConnect LOD Importer", self.iface.mainWindow())
         self.action.triggered.connect(self.run)
